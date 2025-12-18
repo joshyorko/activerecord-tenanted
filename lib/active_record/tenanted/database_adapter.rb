@@ -25,7 +25,7 @@ module ActiveRecord
       end
 
       register "sqlite3", "ActiveRecord::Tenanted::DatabaseAdapters::SQLite"
-      register "postgresql", "ActiveRecord::Tenanted::DatabaseAdapters::PostgreSQL"
+      register "postgresql", "ActiveRecord::Tenanted::DatabaseAdapters::PostgreSQL::Factory"
     end
   end
 end
