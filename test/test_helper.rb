@@ -249,6 +249,32 @@ module ActiveRecord
       end
 
       private
+        def drop_shared_databases
+          shared_configs = all_configs.reject { |c| c.configuration_hash[:tenanted] || c.database.blank? }
+          return if shared_configs.empty?
+
+          shared_configs.each do |config|
+            ActiveRecord::Tasks::DatabaseTasks.drop(config)
+          rescue => e
+            Rails.logger.warn "Failed to cleanup shared database #{config.name}: #{e.message}"
+          end
+        end
+
+        def drop_tentant_databases
+          base_config = all_configs.find { |c| c.configuration_hash[:tenanted] }
+          return unless base_config
+
+          tenants = base_config.tenants
+          return if tenants.empty?
+
+          tenants.each do |tenant_name|
+            adapter = base_config.new_tenant_config(tenant_name).config_adapter
+            adapter.drop_database
+          rescue => e
+            Rails.logger.warn "Failed to cleanup tenant database #{tenant_name}: #{e.message}"
+          end
+        end
+
         def create_fake_record
           # emulate models like ActiveStorage::Record that inherit directly from AR::Base
           Object.const_set(:FakeRecord, Class.new(ActiveRecord::Base))
