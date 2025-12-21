@@ -64,11 +64,16 @@ module ActiveRecord
           end
         end
 
-        def for_each_scenario(s = all_scenarios, except: {}, &block)
+        def for_each_scenario(s = all_scenarios, except: {}, only: {}, &block)
           s.each do |db_scenario, model_scenarios|
             with_db_scenario(db_scenario) do
               model_scenarios.each do |model_scenario|
+                scenario_name = db_scenario.to_s.split("/").last
+                adapter = db_scenario.to_s.include?("/") ? db_scenario.to_s.split("/").first.to_sym : nil
+
+                next if only.present? && only.dig(:adapter) != adapter
                 next if except[db_scenario.to_sym]&.include?(model_scenario.to_sym)
+                next if except[scenario_name.to_sym]&.include?(model_scenario.to_sym)
                 with_model_scenario(model_scenario, &block)
               end
             end
@@ -76,29 +81,62 @@ module ActiveRecord
         end
 
         def all_scenarios
-          Dir.glob(File.join(__dir__, "scenarios", "*", "database.yml"))
-            .each_with_object({}) do |db_config_path, scenarios|
+          nested = Dir.glob(File.join(__dir__, "scenarios", "*", "*", "database.yml"))
+          legacy = Dir.glob(File.join(__dir__, "scenarios", "*", "database.yml"))
+
+          nested.each_with_object({}) do |db_config_path, scenarios|
             db_config_dir = File.dirname(db_config_path)
+            db_adapter = File.basename(File.dirname(db_config_dir))
             db_scenario = File.basename(db_config_dir)
             model_files = Dir.glob(File.join(db_config_dir, "*.rb"))
 
-            scenarios[db_scenario] = model_files.map { File.basename(_1, ".*") }
+            scenarios["#{db_adapter}/#{db_scenario}"] = model_files.map { File.basename(_1, ".*") }
+          end.tap do |scenarios|
+            legacy.each do |db_config_path|
+              db_config_dir = File.dirname(db_config_path)
+              db_scenario = File.basename(db_config_dir)
+              model_files = Dir.glob(File.join(db_config_dir, "*.rb"))
+              scenarios["sqlite/#{db_scenario}"] = model_files.map { File.basename(_1, ".*") }
+            end
           end
         end
 
         def with_db_scenario(db_scenario, &block)
-          db_config_path = File.join(__dir__, "scenarios", db_scenario.to_s, "database.yml")
+          db_adapter, db_name = db_scenario.to_s.split("/", 2)
+
+          if db_name.nil?
+            db_name = db_adapter
+            matching_scenarios = all_scenarios.keys.select { |key| key.to_s.end_with?("/#{db_name}") }
+            raise "Could not find scenario: #{db_name}" if matching_scenarios.empty?
+
+            if matching_scenarios.size > 1
+              matching_scenarios.each { |scenario| with_db_scenario(scenario, &block) }
+              return
+            end
+
+            db_adapter, db_name = matching_scenarios.first.to_s.split("/", 2)
+          end
+
+          db_config_path = if db_adapter == "sqlite"
+            File.join(__dir__, "scenarios", db_name, "database.yml")
+          else
+            File.join(__dir__, "scenarios", db_adapter, db_name, "database.yml")
+          end
           raise "Could not find scenario db config: #{db_config_path}" unless File.exist?(db_config_path)
 
-          describe "scenario::#{db_scenario}" do
+          describe "scenario::#{db_adapter}/#{db_name}" do
             @db_config_dir = db_config_dir = File.dirname(db_config_path)
 
             let(:ephemeral_path) { Dir.mktmpdir("test-activerecord-tenanted-") }
             let(:storage_path) { File.join(ephemeral_path, "storage") }
             let(:db_path) { File.join(ephemeral_path, "db") }
-            let(:db_scenario) { db_scenario.to_sym }
-            let(:db_config_yml) { sprintf(File.read(db_config_path), storage: storage_path, db_path: db_path) }
-            let(:db_config) { YAML.load(db_config_yml) }
+            let(:db_adapter) { "#{db_adapter}" }
+            let(:db_scenario) { db_name.to_sym }
+            let(:db_config_yml) do
+              erb_content = ERB.new(File.read(db_config_path)).result(binding)
+              sprintf(erb_content, storage: storage_path, db_path: db_path, tenant: "%{tenant}")
+            end
+            let(:db_config) { YAML.load(db_config_yml, aliases: true) }
 
             setup do
               FileUtils.mkdir(db_path)
