@@ -20,10 +20,15 @@ require "open3"
 require "active_support"
 require "active_support/core_ext/object" # deep_dup
 
-scenarios = Dir.glob("test/scenarios/*db/*record.rb").map do |path|
-  database, models = path.scan(%r{test/scenarios/(.+db)/(.+record).rb}).flatten
-  { database: database, models: models }
+scenarios = Dir.glob("test/scenarios/*/*/*record.rb").map do |path|
+  adapter, database, models = path.scan(%r{test/scenarios/(.+)/([^/]+)/(.+record).rb}).flatten
+  { adapter: adapter, database: database, models: models }
 end
+
+scenarios.concat Dir.glob("test/scenarios/*db/*record.rb").map { |path|
+  database, models = path.scan(%r{test/scenarios/(.+db)/(.+record).rb}).flatten
+  { adapter: "sqlite", database: database, models: models }
+}
 
 # Filter by adapter if ADAPTER environment variable is set
 if ENV["ADAPTER"]
