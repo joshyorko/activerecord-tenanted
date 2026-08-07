@@ -1,4 +1,5 @@
 #!/usr/bin/env ruby
+# frozen_string_literal: true
 
 GEM_PATH     = File.expand_path(File.join(__dir__, "../"))
 SMARTY_PATH  = File.join(GEM_PATH, "test/smarty")
@@ -16,6 +17,7 @@ PARALLEL = ENV["NCPU"].to_i > 1
 require "fileutils"
 require "tmpdir"
 require "yaml"
+require "erb"
 require "open3"
 require "active_support"
 require "active_support/core_ext/object" # deep_dup
@@ -72,10 +74,18 @@ def run_scenario(scenario)
   ENV["POSTGRES_UNIQUE_PREFIX"] = db_prefix if scenario[:adapter] == "postgresql"
   ENV["MYSQL_UNIQUE_PREFIX"] = db_prefix if scenario[:adapter] == "mysql"
 
-  # generate database file
-  database_file = File.join(GEM_PATH, "test/scenarios/#{scenario[:database]}/database.yml")
-  database_file_contents = sprintf(File.read(database_file), storage: "storage", db_path: "db")
-  database_file_hash = YAML.load(database_file_contents)
+  scenario_root = if scenario[:adapter] == "sqlite"
+    File.join(GEM_PATH, "test/scenarios", scenario[:database])
+  else
+    File.join(GEM_PATH, "test/scenarios", scenario[:adapter], scenario[:database])
+  end
+
+  # Render ERB before scenario substitutions so adapter fixture environment
+  # values and `%{tenant}` templates remain distinct.
+  database_file = File.join(scenario_root, "database.yml")
+  database_file_contents = ERB.new(File.read(database_file)).result
+  database_file_contents = sprintf(database_file_contents, storage: "storage", db_path: "db")
+  database_file_hash = YAML.load(database_file_contents, aliases: true)
   database_file_hash["development"] = database_file_hash["test"].deep_dup
   database_file_hash["development"].each_value do |hash|
     hash["database"] = hash["database"].sub("/test/", "/development/")
@@ -83,14 +93,14 @@ def run_scenario(scenario)
   File.write(File.join(app_path, "config/database.yml"), database_file_hash.to_yaml)
 
   # generate models using ApplicationRecord
-  models_file = File.join(GEM_PATH, "test/scenarios/#{scenario[:database]}/#{scenario[:models]}.rb")
+  models_file = File.join(scenario_root, "#{scenario[:models]}.rb")
   models_file_contents = File.read(models_file)
                            .gsub("TenantedApplicationRecord", "ApplicationRecord")
   File.write(File.join(app_path, "app/models/application_record.rb"), models_file_contents)
 
   # copy migrations from scenario and smarty app
   FileUtils.mkdir_p(File.join(app_path, "db"))
-  FileUtils.cp_r(Dir.glob(File.join(GEM_PATH, "test/scenarios/#{scenario[:database]}/*migrations")),
+  FileUtils.cp_r(Dir.glob(File.join(scenario_root, "*migrations")),
                  File.join(app_path, "db"))
   FileUtils.cp_r(Dir.glob(File.join(app_path, "db/migrate/*rb")),
                  File.join(app_path, "db/tenanted_migrations"))
@@ -106,7 +116,7 @@ def run_scenario(scenario)
       run_cmd(scenario, "bin/rails db:prepare")
 
       # validate-ish the setup
-      prefix = scenario[:database].match?(/\Asecondary/) ? "tenanted_" : ""
+      prefix = scenario[:database].start_with?("secondary") ? "tenanted_" : ""
       File.exist?("db/#{prefix}schema.rb") || abort("Schema dump not generated")
       File.exist?("db/#{prefix}schema_cache.yml") || abort("Schema cache dump not generated")
 
@@ -126,7 +136,7 @@ def run_scenario(scenario)
         { "PARALLEL_WORKERS" => "1" }
       end
 
-      run_cmd(scenario, ["bin/rails test", *TEST_ARGS].join(" "), verbose: true, env:)
+      run_cmd(scenario, [ "bin/rails test", *TEST_ARGS ].join(" "), verbose: true, env:)
     ensure
       ENV["BUNDLE_GEMFILE"] = nil
     end

@@ -3,6 +3,18 @@
 require "test_helper"
 
 describe ActiveRecord::Tenanted::DatabaseTasks do
+  describe "#tenants" do
+    with_scenario("postgresql/primary_db_database_strategy", :primary_record) do
+      test "excludes ordinary Rails databases that happen to match the tenant template" do
+        assert_includes(base_config.tenants, "shared", "the broad physical template demonstrates the collision")
+
+        tenants = ActiveRecord::Tenanted::DatabaseTasks.new(base_config).tenants
+
+        assert_not_includes(tenants, "shared")
+      end
+    end
+  end
+
   describe "#drop_tenant" do
     for_each_scenario do
       setup do

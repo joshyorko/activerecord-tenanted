@@ -106,4 +106,43 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
-      - run: bin/test-integration
+      - run: ADAPTER=sqlite bin/test-integration
+
+  postgresql:
+    name: "PostgreSQL 17 (Rails 8.1)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      BUNDLE_GEMFILE: gemfiles/rails_8_1.gemfile
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USERNAME: postgres
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: test
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@afeafc3d1ab54a631816aba4c914a0081c12ff2f # v1.310.0
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - run: >-
+          bin/test-unit test/unit/postgresql_rails_api_isolation_test.rb
+          test/unit/postgresql_database_strategy_test.rb
+          test/unit/postgresql_colocated_schema_test.rb
+          test/unit/database_tasks_test.rb
+      - run: ADAPTER=postgresql bin/test-integration

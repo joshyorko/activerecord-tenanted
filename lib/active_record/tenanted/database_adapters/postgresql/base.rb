@@ -43,33 +43,13 @@ module ActiveRecord
           def validate_tenant_name(tenant_name)
             return if tenant_name == "%" || tenant_name == "(.+)"
 
-            identifier = identifier_for(tenant_name)
-            return if identifier.include?("%{") || identifier.include?("%}")
-
-            # PostgreSQL identifier max length is 63 bytes
-            if identifier.length > 63
-              raise ActiveRecord::Tenanted::BadTenantNameError,
-                "PostgreSQL identifier too long (max 63 characters): #{identifier.inspect}"
-            end
-
-            # PostgreSQL identifiers: letters, numbers, underscores, dollar signs, hyphens
-            if identifier.match?(/[^a-z0-9_$-]/i)
-              raise ActiveRecord::Tenanted::BadTenantNameError,
-                "PostgreSQL identifier contains invalid characters " \
-                "(only letters, numbers, underscores, $, and hyphens allowed): #{identifier.inspect}"
-            end
-
-            # Must start with letter or underscore
-            unless identifier.match?(/^[a-z_]/i)
-              raise ActiveRecord::Tenanted::BadTenantNameError,
-                "PostgreSQL identifier must start with a letter or underscore: #{identifier.inspect}"
-            end
+            name_template.physical_name(tenant_name)
           end
 
           # Returns the identifier (database or schema name) for validation
           # Subclasses can override if needed
           def identifier_for(tenant_name)
-            sprintf(db_config.database, tenant: tenant_name.to_s)
+            name_template.physical_name(tenant_name)
           end
 
           def database_ready?
@@ -87,13 +67,10 @@ module ActiveRecord
           end
 
           def test_workerize(db, test_worker_id)
-            test_worker_suffix = "_#{test_worker_id}"
+            logical_name = name_template.logical_name(db)
+            return db unless logical_name
 
-            if db.end_with?(test_worker_suffix)
-              db
-            else
-              db + test_worker_suffix
-            end
+            name_template.physical_name(logical_name, worker_id: test_worker_id)
           end
 
           def path_for(name)
@@ -103,6 +80,15 @@ module ActiveRecord
 
           def maintenance_db_name
             db_config.configuration_hash[:maintenance_database] || "postgres"
+          end
+
+        private
+          def name_template
+            @name_template ||= NameTemplate.new(db_config.database, label: "database")
+          end
+
+          def configured_test_worker_id
+            db_config.test_worker_id if db_config.respond_to?(:test_worker_id)
           end
         end
       end

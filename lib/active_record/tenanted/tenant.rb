@@ -110,7 +110,7 @@ module ActiveRecord
         end
 
         def tenant_exist?(tenant_name)
-          tenanted_root_config.new_tenant_config(tenant_name).config_adapter.database_ready?
+          ActiveRecord::Tenanted::DatabaseTasks.new(tenanted_root_config).tenant_ready?(tenant_name)
         end
 
         def with_tenant(tenant_name, prohibit_shard_swapping: true, &block)
@@ -130,31 +130,22 @@ module ActiveRecord
         end
 
         def create_tenant(tenant_name, if_not_exists: false, &block)
-          created_db = false
+          tenant_name = tenant_name.to_s
           base_config = tenanted_root_config
-          adapter = base_config.new_tenant_config(tenant_name).config_adapter
+          tasks = ActiveRecord::Tenanted::DatabaseTasks.new(base_config)
 
-          adapter.acquire_ready_lock do
-            unless adapter.database_exist?
-              adapter.create_database
-
-              # Disable schema version checks during tenant creation and migration
-              # This prevents PendingMigrationError when the tenant schema is first being set up
-              Thread.current[:ar_tenanted_skip_schema_check] = true
-              begin
-                with_tenant(tenant_name) do
-                  connection_pool(schema_version_check: false)
-                  ActiveRecord::Tenanted::DatabaseTasks.new(base_config).migrate_tenant(tenant_name)
-                end
-              ensure
-                Thread.current[:ar_tenanted_skip_schema_check] = false
+          created_db = tasks.prepare_tenant(tenant_name) do
+            # Disable schema version checks during tenant creation and migration. This prevents
+            # PendingMigrationError while recovering an existing but incomplete tenant, too.
+            previous_skip_schema_check = Thread.current[:ar_tenanted_skip_schema_check]
+            Thread.current[:ar_tenanted_skip_schema_check] = true
+            begin
+              with_tenant(tenant_name) do
+                connection_pool(schema_version_check: false)
               end
-
-              created_db = true
+            ensure
+              Thread.current[:ar_tenanted_skip_schema_check] = previous_skip_schema_check
             end
-          rescue
-            adapter.drop_database
-            raise
           end
 
           raise TenantExistsError unless created_db || if_not_exists
@@ -173,14 +164,14 @@ module ActiveRecord
             end
           end
 
-          tenanted_root_config.new_tenant_config(tenant_name).config_adapter.drop_database
+          ActiveRecord::Tenanted::DatabaseTasks.new(tenanted_root_config).drop_tenant(tenant_name)
         end
 
         def tenants
           # DatabaseConfigurations::BaseConfig#tenants returns all tenants whose database files
           # exist, but some of those may be getting initially migrated, so we perform an additional
           # filter on readiness with `tenant_exist?`.
-          tenanted_root_config.tenants.select { |t| tenant_exist?(t) }
+          ActiveRecord::Tenanted::DatabaseTasks.new(tenanted_root_config).tenants.select { |t| tenant_exist?(t) }
         end
 
         def with_each_tenant(**options, &block)

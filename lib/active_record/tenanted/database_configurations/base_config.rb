@@ -76,6 +76,13 @@ module ActiveRecord
         def max_connection_pools
           (configuration_hash[:max_connection_pools] || DEFAULT_MAX_CONNECTION_POOLS).to_i
         end
+
+        private
+          def host_for(tenant_name)
+            return nil unless host&.include?("%{tenant}")
+
+            sprintf(host, tenant: tenant_name)
+          end
       end
     end
   end

@@ -29,44 +29,22 @@ module ActiveRecord
           end
 
           def tenant_databases
-            # Query for all schemas matching the pattern
-            schema_pattern = schema_name_for("%")
-            scanner_pattern = schema_name_for("(.+)")
-            scanner = Regexp.new("^" + Regexp.escape(scanner_pattern).gsub(Regexp.escape("(.+)"), "(.+)") + "$")
+            with_base_connection do |connection|
+              result = connection.execute(<<~SQL)
+                SELECT nspname AS schema_name
+                FROM pg_namespace
+                ORDER BY nspname
+              SQL
 
-            begin
-              with_base_connection do |connection|
-                # PostgreSQL stores schemas in information_schema.schemata
-                result = connection.execute(<<~SQL)
-                  SELECT schema_name#{' '}
-                  FROM information_schema.schemata#{' '}
-                  WHERE schema_name LIKE '#{connection.quote_string(schema_pattern)}'
-                    AND schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-                  ORDER BY schema_name
-                SQL
+              result.filter_map do |row|
+                schema_name = row["schema_name"] || row[0]
+                next if reserved_schema?(schema_name)
 
-                result.filter_map do |row|
-                  schema_name = row["schema_name"] || row[0]
-                  match = schema_name.match(scanner)
-                  if match.nil?
-                    Rails.logger.warn "ActiveRecord::Tenanted: Cannot parse tenant name from schema #{schema_name.inspect}"
-                    nil
-                  else
-                    tenant_name = match[1]
+                tenant_name = name_template.logical_name(schema_name, worker_id: configured_test_worker_id)
+                next unless tenant_name
 
-                    # Strip test_worker_id suffix if present
-                    if db_config.test_worker_id
-                      test_worker_suffix = "_#{db_config.test_worker_id}"
-                      tenant_name = tenant_name.delete_suffix(test_worker_suffix)
-                    end
-
-                    tenant_name
-                  end
-                end
+                tenant_name
               end
-            rescue ActiveRecord::NoDatabaseError, PG::Error => e
-              Rails.logger.warn "Failed to list tenant schemas: #{e.message}"
-              []
             end
           end
 
@@ -76,9 +54,7 @@ module ActiveRecord
 
             with_base_connection do |connection|
               quoted_schema = connection.quote_table_name(schema)
-
-              # Create the schema (our patch makes this idempotent with IF NOT EXISTS)
-              connection.execute("CREATE SCHEMA IF NOT EXISTS #{quoted_schema}")
+              connection.create_schema(schema, if_not_exists: true)
 
               # Commit any pending transaction to ensure schema is visible to other connections
               # with_temporary_connection may wrap DDL in a transaction
@@ -155,20 +131,20 @@ module ActiveRecord
               SQL
               result.any?
             end
-          rescue ActiveRecord::NoDatabaseError, PG::Error
-            false
           end
 
           def database_path
             # Returns the schema name for this tenant
             # For PostgreSQL with schema-based tenancy, we store the schema name separately
             # because db_config.database is the base database name
-            db_config.configuration_hash[:tenant_schema] || db_config.database
+            db_config.configuration_hash[:tenant_schema] ||
+              raise(ActiveRecord::Tenanted::NoTenantError, "PostgreSQL tenant_schema not set")
           end
 
           # Prepare tenant config hash with schema-specific settings
           def prepare_tenant_config_hash(config_hash, base_config, tenant_name)
-            schema_name = identifier_for(tenant_name)
+            worker_id = base_config.test_worker_id if base_config.respond_to?(:test_worker_id)
+            schema_name = name_template.physical_name(tenant_name, worker_id: worker_id)
             database_name = base_config.database
 
             config_hash.merge(
@@ -179,10 +155,21 @@ module ActiveRecord
           end
 
           def identifier_for(tenant_name)
-            sprintf("%{tenant}", tenant: tenant_name.to_s)
+            name_template.physical_name(tenant_name)
           end
 
         private
+          def name_template
+            @name_template ||= NameTemplate.new(
+              db_config.configuration_hash[:schema_name_pattern],
+              label: "schema_name_pattern"
+            )
+          end
+
+          def reserved_schema?(schema_name)
+            schema_name == "public" || schema_name == "information_schema" || schema_name.start_with?("pg_")
+          end
+
           def with_base_connection(&block)
             # Connect to the base database (without tenant-specific schema)
             # This allows us to create/drop/query schemas
@@ -227,9 +214,6 @@ module ActiveRecord
                 connection.raw_connection.exec("CREATE DATABASE #{connection.quote_table_name(base_db_name)}#{encoding_clause}#{collation_clause}")
               end
             end
-          rescue PG::Error => e
-            # Ignore if database already exists (race condition)
-            raise unless e.message.include?("already exists")
           rescue StandardError => e
             Rails.logger.error "Failed to ensure base database exists: #{e.class}: #{e.message}"
             raise
@@ -255,12 +239,6 @@ module ActiveRecord
 
           def extract_base_database_name
             db_config.database
-          end
-
-          def schema_name_for(tenant_name)
-            # Generate schema name from tenant name
-            # Delegate to identifier_for for consistency
-            identifier_for(tenant_name)
           end
         end
       end

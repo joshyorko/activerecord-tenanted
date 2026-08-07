@@ -79,7 +79,7 @@ module ActiveRecord
                   [ db_name ]
                 )
                 conn.exec("DROP DATABASE IF EXISTS #{conn.escape_identifier(db_name)}")
-              rescue => e
+              rescue
                 # Ignore errors
               end
             end
@@ -105,14 +105,14 @@ module ActiveRecord
                 schema_name = row["schema_name"]
                 begin
                   conn.exec("DROP SCHEMA IF EXISTS #{conn.escape_identifier(schema_name)} CASCADE")
-                rescue => e
+                rescue
                   # Ignore
                 end
               end
             end
 
             conn.close if conn
-          rescue => e
+          rescue
             # Continue if PostgreSQL isn't available
           end
         end
@@ -136,7 +136,9 @@ module ActiveRecord
           end
         end
 
-        def for_each_scenario(s = all_scenarios, except: {}, only: {}, &block)
+        def for_each_scenario(s = nil, except: {}, only: {}, &block)
+          s ||= only[:adapter] ? scenarios_for_adapter(only[:adapter]) : all_scenarios
+
           s.each do |db_scenario, model_scenarios|
             with_db_scenario(db_scenario) do
               model_scenarios.each do |model_scenario|
@@ -153,24 +155,23 @@ module ActiveRecord
         end
 
         def all_scenarios
-          nested = Dir.glob(File.join(__dir__, "scenarios", "*", "*", "database.yml"))
-          legacy = Dir.glob(File.join(__dir__, "scenarios", "*", "database.yml"))
-
-          nested.each_with_object({}) do |db_config_path, scenarios|
-            db_config_dir = File.dirname(db_config_path)
-            db_adapter = File.basename(File.dirname(db_config_dir))
-            db_scenario = File.basename(db_config_dir)
-            model_files = Dir.glob(File.join(db_config_dir, "*.rb"))
-
-            scenarios["#{db_adapter}/#{db_scenario}"] = model_files.map { File.basename(_1, ".*") }
-          end.tap do |scenarios|
-            legacy.each do |db_config_path|
+          Dir.glob(File.join(__dir__, "scenarios", "*", "database.yml"))
+            .each_with_object({}) do |db_config_path, scenarios|
               db_config_dir = File.dirname(db_config_path)
               db_scenario = File.basename(db_config_dir)
               model_files = Dir.glob(File.join(db_config_dir, "*.rb"))
               scenarios["sqlite/#{db_scenario}"] = model_files.map { File.basename(_1, ".*") }
             end
-          end
+        end
+
+        def scenarios_for_adapter(adapter)
+          Dir.glob(File.join(__dir__, "scenarios", adapter.to_s, "*", "database.yml"))
+            .each_with_object({}) do |db_config_path, scenarios|
+              db_config_dir = File.dirname(db_config_path)
+              db_scenario = File.basename(db_config_dir)
+              model_files = Dir.glob(File.join(db_config_dir, "*.rb"))
+              scenarios["#{adapter}/#{db_scenario}"] = model_files.map { File.basename(_1, ".*") }
+            end
         end
 
         def with_db_scenario(db_scenario, &block)
@@ -211,6 +212,13 @@ module ActiveRecord
             let(:db_config) { YAML.load(db_config_yml, aliases: true) }
 
             setup do
+              expected_adapter = db_adapter == "sqlite" ? "sqlite3" : db_adapter
+              configured_adapters = db_config.fetch("test").values.filter_map { _1["adapter"] }.uniq
+              unless configured_adapters == [ expected_adapter ]
+                raise "Scenario #{db_adapter}/#{db_name} configures #{configured_adapters.inspect}, " \
+                  "expected #{expected_adapter.inspect}"
+              end
+
               FileUtils.mkdir(db_path)
               FileUtils.cp_r Dir.glob(File.join(db_config_dir, "*migrations")), db_path
 

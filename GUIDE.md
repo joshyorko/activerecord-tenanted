@@ -274,7 +274,7 @@ end
 
 #### 2.2.1 PostgreSQL Multi-Tenancy Strategies
 
-PostgreSQL supports two isolation strategies, automatically inferred from the database name configuration.
+PostgreSQL supports two explicit, mutually exclusive isolation strategies. Configure exactly one `%{tenant}` placeholder in either `database` or `schema_name_pattern`.
 
 ##### Schema-Based Multi-Tenancy
 
@@ -287,16 +287,17 @@ production:
   primary:
     adapter: postgresql
     database: myapp_production  # Static database name
+    schema_name_pattern: "tenant_%{tenant}"
     tenanted: true
     host: localhost
 ```
 
 In this configuration:
 - A single PostgreSQL database named `myapp_production` is created (static name)
-- Each tenant gets its own schema with the prefix `account-` (e.g., `account-tenant1`, `account-tenant2`)
+- Each tenant gets its own schema from `schema_name_pattern` (for example, `tenant_retailer-one`)
 - The `schema_search_path` is set automatically to isolate tenants
 - All tables and data are stored within the tenant-specific schema
-- **Auto-detection:** Automatically used when database name does NOT contain `%{tenant}`
+- `schema_name_pattern` provides a namespace boundary so unrelated schemas are never treated as tenants
 
 **Advantages:**
 - **Resource Efficient**: Single database process serves all tenants
@@ -320,16 +321,16 @@ Creates separate PostgreSQL databases for each tenant. Similar to how MySQL and 
 production:
   primary:
     adapter: postgresql
-    database: "%{tenant}"
+    database: "tenant_%{tenant}"
     tenanted: true
     host: localhost
 ```
 
 In this configuration:
-- Each tenant gets its own PostgreSQL database: `account_foo`, `account_bar`, etc.
+- Each tenant gets its own PostgreSQL database: `tenant_foo`, `tenant_bar`, etc.
 - Each database has independent schemas, users, and settings
 - Complete isolation between tenants at the database level
-- **Auto-detection:** Automatically used when database name contains `%{tenant}`
+- The database template must contain exactly one `%{tenant}` placeholder
 
 **Advantages:**
 - **Stronger Isolation**: Complete database-level separation
@@ -365,7 +366,7 @@ In this configuration:
 - You're following PostgreSQL best practices
 - Tenants share the same configuration needs
 - You want simpler operations (backup, monitoring, etc.)
-- Configuration: Use a static database name (e.g., `database: myapp_production`)
+- Configuration: Use a static database plus `schema_name_pattern` containing `%{tenant}`
 
 **Use Database Strategy when:**
 - You have few tenants (less than 100)
@@ -373,7 +374,7 @@ In this configuration:
 - Each tenant needs different database settings
 - You need to easily export individual tenant databases
 - You want consistency with MySQL/SQLite behavior
-- Configuration: Use `%{tenant}` in database name (e.g., `database: "%{tenant}"`)
+- Configuration: Use exactly one `%{tenant}` in the database name
 
 ##### Migration Between Strategies
 
@@ -381,8 +382,8 @@ To change strategies, you'll need to:
 
 1. Export data from existing tenants
 2. Update `database.yml`:
-   - For Schema → Database: Change `database: myapp_production` to `database: "%{tenant}"`
-   - For Database → Schema: Change `database: "%{tenant}"` to `database: myapp_production`
+   - For Schema → Database: remove `schema_name_pattern` and put `%{tenant}` in `database`
+   - For Database → Schema: make `database` static and add `schema_name_pattern`
 3. Create new tenant databases/schemas
 4. Import data into new structure
 
@@ -390,19 +391,9 @@ To change strategies, you'll need to:
 
 ##### PostgreSQL Tenant Name Constraints
 
-PostgreSQL has strict naming conventions for identifiers (database names and schema names). When using PostgreSQL with this gem, tenant names are subject to the following constraints:
+Logical tenant names are mapped reversibly into quoted PostgreSQL identifiers. UUIDs, integers, spaces, dots, slashes, and hyphens are supported. Names must be non-empty, must not contain NUL, and the complete rendered database or schema identifier (including any parallel-test worker envelope) must fit PostgreSQL's 63-byte identifier limit.
 
-**Allowed Characters:**
-- Letters (a-z, A-Z)
-- Numbers (0-9)
-- Underscores (`_`)
-- Dollar signs (`$`)
-- Hyphens (`-`)
-
-**Additional Constraints:**
-- **Maximum Length:** 63 characters total (including the `account-` prefix for schema strategy)
-- **First Character:** Must be a letter or underscore (cannot start with a number or special character)
-- **Forward Slashes:** Not allowed in PostgreSQL identifiers
+Tenant creation, recovery, migration, and cleanup are serialized with a session-level PostgreSQL advisory lock. A failed attempt removes only a resource it created. Schema enumeration is anchored to `schema_name_pattern` and excludes PostgreSQL's reserved schemas.
 
 ### 2.3 Configuring `max_connection_pools`
 

@@ -29,22 +29,62 @@ module ActiveRecord
       end
 
       def migrate_tenant(tenant = set_current_tenant)
+        prepare_tenant(tenant)
+      end
+
+      def prepare_tenant(tenant = set_current_tenant)
+        tenant = tenant.to_s
         db_config = config.new_tenant_config(tenant)
-        migrate(db_config)
+        adapter = db_config.config_adapter
+        created_by_attempt = false
+
+        with_lifecycle_lock(adapter, tenant) do
+          unless adapter.database_exist?
+            adapter.create_database
+            created_by_attempt = true
+          end
+
+          yield db_config if block_given?
+          migrate(db_config)
+        rescue
+          adapter.drop_database if created_by_attempt
+          raise
+        end
+
+        created_by_attempt
+      end
+
+      def tenant_ready?(tenant)
+        tenant = tenant.to_s
+        adapter = config.new_tenant_config(tenant).config_adapter
+
+        if adapter.db_config.adapter == "postgresql"
+          with_lifecycle_lock(adapter, tenant) { adapter.database_ready? }
+        else
+          adapter.database_ready?
+        end
       end
 
       def create_all
         # For colocated strategies, create the shared database that will contain all tenants
         # (e.g., PostgreSQL schema strategy creates a single base database for all schemas)
         # For isolated strategies, individual databases are created on-demand via migrate_tenant
-        config.config_adapter.create_colocated_database if adapter_colocated?
+        return unless adapter_colocated?
+
+        adapter = config.config_adapter
+        with_lifecycle_lock(adapter, DatabaseAdapters::Colocated::LIFECYCLE_LOCK_NAME) do
+          adapter.create_colocated_database
+        end
       end
 
       def drop_all
         # For colocated strategies, drop the shared database containing all tenants
         # For isolated strategies, drop each tenant database individually
         if adapter_colocated?
-          config.config_adapter.drop_colocated_database
+          adapter = config.config_adapter
+          with_lifecycle_lock(adapter, DatabaseAdapters::Colocated::LIFECYCLE_LOCK_NAME) do
+            adapter.drop_colocated_database
+          end
         else
           tenants.each do |tenant|
             drop_tenant(tenant)
@@ -53,19 +93,18 @@ module ActiveRecord
       end
 
       def drop_tenant(tenant = set_current_tenant)
+        tenant = tenant.to_s
         db_config = config.new_tenant_config(tenant)
-        db_config.config_adapter.drop_database
+        adapter = db_config.config_adapter
+        with_lifecycle_lock(adapter, tenant) { adapter.drop_database }
         $stdout.puts "Dropped database '#{db_config.database}'" if verbose?
       end
 
       def tenants
-        # For colocated adapters, exclude the default tenant from the list
-        # since all tenants share the same database/infrastructure
-        if adapter_colocated?
-          config.tenants.presence || []
-        else
-          config.tenants.presence || [ get_default_tenant ].compact
-        end
+        discovered = config.tenants
+        discovered = exclude_ordinary_databases(discovered) unless adapter_colocated?
+
+        discovered.presence || [ get_default_tenant ].compact
       end
 
       def get_default_tenant
@@ -189,6 +228,25 @@ module ActiveRecord
       private
         def adapter_colocated?
           config.config_adapter.respond_to?(:colocated?) && config.config_adapter.colocated?
+        end
+
+        def with_lifecycle_lock(adapter, tenant, &block)
+          if adapter.db_config.adapter == "postgresql"
+            ActiveRecord::Tenanted::DatabaseAdapters::PostgreSQL::AdvisoryLock.new(config).synchronize(tenant, &block)
+          else
+            adapter.acquire_ready_lock(&block)
+          end
+        end
+
+        def exclude_ordinary_databases(tenants)
+          ordinary_databases = ActiveRecord::Base.configurations
+            .configs_for(env_name: config.env_name, include_hidden: true)
+            .reject { |db_config| db_config.configuration_hash[:tenanted] }
+            .filter_map(&:database)
+
+          tenants.reject do |tenant|
+            ordinary_databases.include?(config.new_tenant_config(tenant).database)
+          end
         end
     end
   end

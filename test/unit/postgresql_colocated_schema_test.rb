@@ -4,8 +4,8 @@ require "test_helper"
 
 describe "PostgreSQL Colocated Schema Strategy" do
   with_scenario("postgresql/primary_db_schema_strategy", :primary_record) do
-    describe "account- schema pattern" do
-      test "creates tenants with account- prefixed schema names in a static database" do
+    describe "tenant schema isolation" do
+      test "creates tenant-named schemas in a static database" do
         # Verify the configuration is set correctly
         config = TenantedApplicationRecord.tenanted_root_config
 
@@ -68,19 +68,17 @@ describe "PostgreSQL Colocated Schema Strategy" do
         end
       end
 
-      test "handles UUID-based tenant names" do
+      test "rejects UUID-based tenant names that are invalid PostgreSQL identifiers" do
         uuid = "550e8400-e29b-41d4-a716-446655440000"
 
-        TenantedApplicationRecord.create_tenant(uuid)
-        assert TenantedApplicationRecord.tenant_exist?(uuid)
-
-        TenantedApplicationRecord.with_tenant(uuid) do
-          User.create!(email: "uuid@example.com")
-          assert_equal 1, User.count
+        error = assert_raises(ActiveRecord::Tenanted::BadTenantNameError) do
+          TenantedApplicationRecord.create_tenant(uuid)
         end
+
+        assert_match(/must start with a letter or underscore/, error.message)
       end
 
-      test "schema names are prefixed with account-" do
+      test "schema names match tenant names" do
         tenant_name = "exact-match-test"
         TenantedApplicationRecord.create_tenant(tenant_name)
 
@@ -89,7 +87,7 @@ describe "PostgreSQL Colocated Schema Strategy" do
           schema_name = User.connection.select_value(
             "SELECT current_schema()"
           )
-          assert_equal "account-#{tenant_name}", schema_name
+          assert_equal tenant_name, schema_name
         end
       end
 

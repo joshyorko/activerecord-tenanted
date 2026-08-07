@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative "postgresql/name_template"
 require_relative "postgresql/base"
 require_relative "postgresql/schema"
 require_relative "postgresql/database"

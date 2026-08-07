@@ -670,6 +670,24 @@ describe ActiveRecord::Tenanted::Tenant do
       end
     end
 
+    with_scenario(:primary_named_db, :primary_record) do
+      test "a failed recovery never drops a tenant created by an earlier attempt" do
+        TenantedApplicationRecord.create_tenant("foo")
+        with_new_migration_file
+
+        db_config["test"]["tenanted"]["readonly"] = true
+        ActiveRecord::Base.configurations = db_config
+
+        error = assert_raises(StandardError) do
+          TenantedApplicationRecord.create_tenant("foo", if_not_exists: true)
+        end
+        assert_match(/readonly database/, error.message)
+
+        adapter = TenantedApplicationRecord.tenanted_root_config.new_tenant_config("foo").config_adapter
+        assert_predicate(adapter, :database_exist?)
+      end
+    end
+
     for_each_scenario do
       test "raises an exception if the tenant already exists" do
         TenantedApplicationRecord.create_tenant("foo")
@@ -689,6 +707,18 @@ describe ActiveRecord::Tenanted::Tenant do
           TenantedApplicationRecord.create_tenant("foo", if_not_exists: true) { called = true }
         end
         assert(called, "Block should be called when if_not_exists is true")
+      end
+
+      test "migrates an existing incomplete tenant before treating it as ready" do
+        TenantedApplicationRecord.create_tenant("foo")
+        with_new_migration_file
+
+        TenantedApplicationRecord.create_tenant("foo", if_not_exists: true)
+
+        version = TenantedApplicationRecord.with_tenant("foo") do
+          User.connection_pool.migration_context.current_version
+        end
+        assert_equal(20250213005959, version)
       end
 
       test "creates the database" do
@@ -828,7 +858,7 @@ describe ActiveRecord::Tenanted::Tenant do
         end
       end
 
-      test "does not raise PendingMigrationError during tenant creation" do
+      it "does not raise PendingMigrationError during tenant creation" do
         # This test ensures that the schema version check is properly disabled
         # during tenant creation, preventing PendingMigrationError from being
         # raised when the tenant schema is first being set up
@@ -847,17 +877,17 @@ describe ActiveRecord::Tenanted::Tenant do
         assert_operator(version, :>, 0)
       end
 
-      test "thread-local schema version check flag is properly cleaned up" do
+      it "cleans up the thread-local schema version check flag" do
         # Ensure the thread-local flag is not set before tenant creation
         assert_nil(Thread.current[:ar_tenanted_skip_schema_check])
 
         TenantedApplicationRecord.create_tenant("foo")
 
         # Ensure the thread-local flag is cleaned up after tenant creation
-        assert_equal(false, Thread.current[:ar_tenanted_skip_schema_check])
+        assert_nil(Thread.current[:ar_tenanted_skip_schema_check])
       end
 
-      test "schema version check is enforced after tenant creation" do
+      it "enforces the schema version check after tenant creation" do
         # Create a tenant
         TenantedApplicationRecord.create_tenant("foo") do
           # Force removal of connection pool to trigger recreation
@@ -871,6 +901,72 @@ describe ActiveRecord::Tenanted::Tenant do
         # because schema version check is re-enabled
         assert_raises(ActiveRecord::PendingMigrationError) do
           TenantedApplicationRecord.with_tenant("foo") { User.count }
+        end
+      end
+    end
+
+    [
+      "postgresql/primary_db_database_strategy",
+      "postgresql/primary_db_schema_strategy",
+    ].each do |scenario|
+      with_scenario(scenario, :primary_record) do
+        test "two concurrent PostgreSQL creators converge on one ready tenant" do
+          ready = Queue.new
+          start = Queue.new
+          results = Queue.new
+
+          creators = 2.times.map do
+            Thread.new do
+              ready << true
+              start.pop
+              TenantedApplicationRecord.create_tenant("concurrent_tenant", if_not_exists: true)
+              results << nil
+            rescue => error
+              results << error
+            end
+          end
+
+          2.times { ready.pop }
+          2.times { start << true }
+          creators.each(&:join)
+
+          errors = 2.times.filter_map { results.pop }
+          assert_empty(errors, "both concurrent creators should complete: #{errors.map(&:full_message).join("\n")}")
+          assert(TenantedApplicationRecord.tenant_exist?("concurrent_tenant"))
+
+          version = TenantedApplicationRecord.with_tenant("concurrent_tenant") do
+            User.connection_pool.migration_context.current_version
+          end
+          assert_equal(20250203191115, version)
+        ensure
+          creators&.each { |thread| thread.kill if thread.alive? }
+        end
+
+        test "PostgreSQL readiness waits for the lifecycle owner to finish" do
+          tenant = "readiness_tenant"
+          adapter = base_config.new_tenant_config(tenant).config_adapter
+          resource_created = Queue.new
+          release_owner = Queue.new
+          readiness = Queue.new
+
+          owner = Thread.new do
+            ActiveRecord::Tenanted::DatabaseAdapters::PostgreSQL::AdvisoryLock.new(base_config).synchronize(tenant) do
+              adapter.create_database
+              resource_created << true
+              release_owner.pop
+            end
+          end
+          resource_created.pop
+
+          reader = Thread.new { readiness << TenantedApplicationRecord.tenant_exist?(tenant) }
+
+          assert_nil(readiness.pop(timeout: 0.2), "an existing resource is not ready while its lifecycle lock is held")
+          release_owner << true
+          assert(readiness.pop(timeout: 5), "readiness should be visible after the lifecycle owner releases the lock")
+        ensure
+          release_owner << true if owner&.alive?
+          owner&.join
+          reader&.join
         end
       end
     end

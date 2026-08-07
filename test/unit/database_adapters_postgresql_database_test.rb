@@ -46,4 +46,23 @@ describe ActiveRecord::Tenanted::DatabaseAdapters::PostgreSQL::Database do
       assert_equal "myapp_foo", result
     end
   end
+
+  describe "tenant_databases" do
+    test "returns only logical tenants in its configured namespace" do
+      rows = [
+        { "datname" => "postgres" },
+        { "datname" => "other_retailer-one" },
+        { "datname" => "myapp_retailer-one" },
+        { "datname" => "myapp_12345" },
+      ]
+      executed_sql = []
+      connection = Object.new
+      connection.define_singleton_method(:execute) { |sql| executed_sql << sql; rows }
+
+      adapter.stub :with_maintenance_connection, ->(&block) { block.call(connection) } do
+        assert_equal [ "retailer-one", "12345" ], adapter.tenant_databases
+      end
+      assert_no_match(/\bLIKE\b/i, executed_sql.fetch(0))
+    end
+  end
 end

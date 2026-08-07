@@ -55,18 +55,13 @@ describe ActiveRecord::Tenanted::DatabaseAdapters::PostgreSQL::Base do
   end
 
   describe "test_workerize" do
-    test "appends test worker id to name" do
-      db = "myapp_test"
-      test_worker_id = 1
-      expected = "myapp_test_1"
-      assert_equal(expected, adapter.test_workerize(db, test_worker_id))
-    end
+    test "uses a reversible worker namespace" do
+      worker_one = adapter.test_workerize("myapp_test_1", 1)
+      worker_two = adapter.test_workerize("myapp_test_1", 2)
 
-    test "does not double-suffix if already present" do
-      db = "myapp_test_1"
-      test_worker_id = 1
-      expected = "myapp_test_1"
-      assert_equal(expected, adapter.test_workerize(db, test_worker_id))
+      assert_not_equal worker_one, worker_two
+      assert_equal "test_1", adapter.send(:name_template).logical_name(worker_one, worker_id: 1)
+      assert_equal "test_1", adapter.send(:name_template).logical_name(worker_two, worker_id: 2)
     end
   end
 
@@ -87,7 +82,7 @@ describe ActiveRecord::Tenanted::DatabaseAdapters::PostgreSQL::Base do
       error = assert_raises(ActiveRecord::Tenanted::BadTenantNameError) do
         adapter.validate_tenant_name(long_name)
       end
-      assert_match(/too long/, error.message)
+      assert_match(/exceeds 63 bytes/, error.message)
     end
 
     test "allows identifiers at exactly 63 characters" do
@@ -98,23 +93,22 @@ describe ActiveRecord::Tenanted::DatabaseAdapters::PostgreSQL::Base do
       end
     end
 
-    test "raises error for identifiers with invalid characters" do
-      error = assert_raises(ActiveRecord::Tenanted::BadTenantNameError) do
-        adapter.validate_tenant_name("tenant.name")  # dots are not allowed
+    test "allows identifiers with characters supported through quoting" do
+      assert_nothing_raised do
+        adapter.validate_tenant_name("tenant.name")
+        adapter.validate_tenant_name("tenant name")
+        adapter.validate_tenant_name("myapp/tenant")
       end
-      assert_match(/invalid characters/, error.message)
     end
 
-    test "raises error for identifiers starting with a number" do
-      # Create a config where the pattern would result in an identifier starting with a number
+    test "allows identifiers starting with a number" do
       config_hash = { adapter: "postgresql", database: "%{tenant}_schema" }
       db_config = ActiveRecord::DatabaseConfigurations::HashConfig.new("test", "primary", config_hash)
       adapter = ActiveRecord::Tenanted::DatabaseAdapters::PostgreSQL::Base.new(db_config)
 
-      error = assert_raises(ActiveRecord::Tenanted::BadTenantNameError) do
+      assert_nothing_raised do
         adapter.validate_tenant_name("1tenant")
       end
-      assert_match(/must start with a letter or underscore/, error.message)
     end
 
     test "allows special validation patterns" do
@@ -124,11 +118,11 @@ describe ActiveRecord::Tenanted::DatabaseAdapters::PostgreSQL::Base do
       end
     end
 
-    test "raises error for tenant names with forward slashes" do
+    test "raises error for tenant names containing NUL" do
       error = assert_raises(ActiveRecord::Tenanted::BadTenantNameError) do
-        adapter.validate_tenant_name("myapp/tenant")
+        adapter.validate_tenant_name("myapp\0tenant")
       end
-      assert_match(/invalid characters/, error.message)
+      assert_match(/cannot contain NUL/, error.message)
     end
   end
 

@@ -15,11 +15,21 @@ module ActiveRecord
         # - "database": Uses database-based multi-tenancy
         class Factory
           def self.new(db_config)
-            # Auto-detect strategy: if database name contains %{tenant}, use database strategy
-            if db_config.database.include?("%{tenant}")
+            database_pattern = db_config.database.to_s
+            schema_pattern = db_config.configuration_hash[:schema_name_pattern]
+
+            if database_pattern.include?(NameTemplate::PLACEHOLDER) && schema_pattern
+              raise ActiveRecord::Tenanted::ConfigurationError,
+                "Configure exactly one PostgreSQL tenant template in database or schema_name_pattern"
+            elsif database_pattern.include?(NameTemplate::PLACEHOLDER)
+              NameTemplate.new(database_pattern, label: "database")
               Database.new(db_config)
-            else
+            elsif schema_pattern
+              NameTemplate.new(schema_pattern, label: "schema_name_pattern")
               Schema.new(db_config)
+            else
+              raise ActiveRecord::Tenanted::ConfigurationError,
+                "Configure exactly one PostgreSQL tenant template; static databases require schema_name_pattern"
             end
           end
         end

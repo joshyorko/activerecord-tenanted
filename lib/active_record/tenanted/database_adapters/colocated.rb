@@ -10,6 +10,8 @@ module ActiveRecord
       # - PostgreSQL schema strategy: All tenant schemas in one database
       # - Future: Other colocated strategies (e.g., row-level with tenant_id)
       module Colocated
+        LIFECYCLE_LOCK_NAME = "\0colocated"
+
         # Returns true to indicate this adapter uses a colocated strategy
         def colocated?
           true
